@@ -23,15 +23,22 @@ st.markdown(
 st.title("📅 PLC Team Calendar")
 
 
-# 2. 原生 gspread 数据库连接逻辑
+# 2. 精准用 Sheet ID 连接（彻底解决 404）
 @st.cache_resource
 def get_gspread_client():
     try:
         secrets_dict = dict(st.secrets["connections"]["gsheets"])
-        spreadsheet_url = secrets_dict.pop("spreadsheet", None)
+        spreadsheet_url = secrets_dict.pop("spreadsheet", "")
 
         gc = gspread.service_account_from_dict(secrets_dict)
-        if spreadsheet_url:
+
+        # 从 URL 中精确提取 Sheet ID (例如: 17KsOcPgdS8NRtmGC_C-sQ9Eorl6N9znC0WzA95_X_EY)
+        if "spreadsheets/d/" in spreadsheet_url:
+            sheet_id = spreadsheet_url.split("spreadsheets/d/")[1].split("/")[
+                0
+            ]
+            sh = gc.open_by_key(sheet_id)
+        elif spreadsheet_url:
             sh = gc.open_by_url(spreadsheet_url)
         else:
             sh = gc.open("PLC_Schedule_DB")
@@ -156,7 +163,6 @@ def save_data(events_list, saved_engs, saved_sites, saved_tasks):
         preset_rows.append({"type": "task", "value": task})
     df_presets = pd.DataFrame(preset_rows)
 
-    # 写入 Events 表格
     try:
         ws_events = sh.worksheet("Events")
         ws_events.clear()
@@ -168,7 +174,6 @@ def save_data(events_list, saved_engs, saved_sites, saved_tasks):
             [df_events.columns.values.tolist()] + df_events.values.tolist()
         )
 
-    # 写入 Presets 表格
     try:
         ws_presets = sh.worksheet("Presets")
         ws_presets.clear()
@@ -181,7 +186,6 @@ def save_data(events_list, saved_engs, saved_sites, saved_tasks):
         )
 
 
-# 初始化数据
 if "loaded" not in st.session_state:
     (
         st.session_state.calendar_events,
@@ -191,7 +195,6 @@ if "loaded" not in st.session_state:
     ) = load_data()
     st.session_state.loaded = True
 
-# 3. 页签定义
 tab_calendar, tab_add, tab_manage = st.tabs(
     ["📅 Calendar", "➕ Request", "⚙️ Manage"]
 )

@@ -1,8 +1,8 @@
 from datetime import date, datetime, timedelta, time
+import gspread
 import pandas as pd
 import streamlit as st
 from streamlit_calendar import calendar
-from streamlit_gsheets import GSheetsConnection
 
 # 1. 页面配置与 CSS
 st.set_page_config(page_title="PLC Schedule", page_icon="📅", layout="wide")
@@ -22,20 +22,51 @@ st.markdown(
 
 st.title("📅 PLC Team Calendar")
 
-# 2. 连接到 Google Sheets 数据库
-conn = st.connection("gsheets", type=GSheetsConnection)
 
-
-# 从 Google Sheets 载入数据
-def load_data():
+# 2. 原生 gspread 数据库连接逻辑
+@st.cache_resource
+def get_gspread_client():
     try:
-        df_events = conn.read(worksheet="Events", ttl="0")
-        df_presets = conn.read(worksheet="Presets", ttl="0")
+        secrets_dict = dict(st.secrets["connections"]["gsheets"])
+        spreadsheet_url = secrets_dict.pop("spreadsheet", None)
+
+        gc = gspread.service_account_from_dict(secrets_dict)
+        if spreadsheet_url:
+            sh = gc.open_by_url(spreadsheet_url)
+        else:
+            sh = gc.open("PLC_Schedule_DB")
+        return sh
+    except Exception as e:
+        st.error(f"Cloud DB Connection Error: {e}")
+        return None
+
+
+sh = get_gspread_client()
+
+
+def load_data():
+    if not sh:
+        return (
+            [],
+            ["Kelvin", "Alex", "Dave"],
+            ["Line 1 - Assembly", "Line 2 - Packaging", "Cell A"],
+            ["PLC Wiring"],
+        )
+
+    try:
+        ws_events = sh.worksheet("Events")
+        records_events = ws_events.get_all_records()
+        df_events = pd.DataFrame(records_events)
     except Exception:
         df_events = pd.DataFrame()
+
+    try:
+        ws_presets = sh.worksheet("Presets")
+        records_presets = ws_presets.get_all_records()
+        df_presets = pd.DataFrame(records_presets)
+    except Exception:
         df_presets = pd.DataFrame()
 
-    # 解析 Events
     events_list = []
     if not df_events.empty:
         for _, row in df_events.iterrows():
@@ -60,7 +91,6 @@ def load_data():
                 }
             )
 
-    # 解析 Presets 记忆列表
     saved_engs = ["Kelvin", "Alex", "Dave"]
     saved_sites = ["Line 1 - Assembly", "Line 2 - Packaging", "Cell A"]
     saved_tasks = [
@@ -81,18 +111,19 @@ def load_data():
             "value"
         ].dropna().tolist()
         if e_list:
-            saved_engs = list(set(saved_engs + e_list))
+            saved_engs = list(set(saved_engs + [str(x) for x in e_list]))
         if s_list:
-            saved_sites = list(set(saved_sites + s_list))
+            saved_sites = list(set(saved_sites + [str(x) for x in s_list]))
         if t_list:
-            saved_tasks = list(set(saved_tasks + t_list))
+            saved_tasks = list(set(saved_tasks + [str(x) for x in t_list]))
 
     return events_list, saved_engs, saved_sites, saved_tasks
 
 
-# 保存数据回到 Google Sheets
 def save_data(events_list, saved_engs, saved_sites, saved_tasks):
-    # 构建 Events 表格
+    if not sh:
+        return
+
     rows = []
     for evt in events_list:
         props = evt.get("extendedProps", {})
@@ -116,7 +147,6 @@ def save_data(events_list, saved_engs, saved_sites, saved_tasks):
         )
     df_events = pd.DataFrame(rows)
 
-    # 构建 Presets 表格
     preset_rows = []
     for eng in saved_engs:
         preset_rows.append({"type": "engineer", "value": eng})
@@ -126,12 +156,32 @@ def save_data(events_list, saved_engs, saved_sites, saved_tasks):
         preset_rows.append({"type": "task", "value": task})
     df_presets = pd.DataFrame(preset_rows)
 
-    # 更新到云端
-    conn.update(worksheet="Events", data=df_events)
-    conn.update(worksheet="Presets", data=df_presets)
+    # 写入 Events 表格
+    try:
+        ws_events = sh.worksheet("Events")
+        ws_events.clear()
+    except Exception:
+        ws_events = sh.add_worksheet(title="Events", rows="1000", cols="20")
+
+    if not df_events.empty:
+        ws_events.update(
+            [df_events.columns.values.tolist()] + df_events.values.tolist()
+        )
+
+    # 写入 Presets 表格
+    try:
+        ws_presets = sh.worksheet("Presets")
+        ws_presets.clear()
+    except Exception:
+        ws_presets = sh.add_worksheet(title="Presets", rows="1000", cols="10")
+
+    if not df_presets.empty:
+        ws_presets.update(
+            [df_presets.columns.values.tolist()] + df_presets.values.tolist()
+        )
 
 
-# 载入数据
+# 初始化数据
 if "loaded" not in st.session_state:
     (
         st.session_state.calendar_events,
@@ -146,7 +196,6 @@ tab_calendar, tab_add, tab_manage = st.tabs(
     ["📅 Calendar", "➕ Request", "⚙️ Manage"]
 )
 
-# ----------------- TAB 1: 📱 手机友好型日历 -----------------
 with tab_calendar:
     calendar_options = {
         "headerToolbar": {
@@ -166,7 +215,6 @@ with tab_calendar:
         key="plc_calendar",
     )
 
-# ----------------- TAB 2: 动态响应表单 -----------------
 with tab_add:
     st.subheader("📝 Request Manpower")
 
@@ -296,7 +344,6 @@ with tab_add:
                 }
                 st.session_state.calendar_events.append(new_event)
 
-            # 同步保存到 Google Sheets
             save_data(
                 st.session_state.calendar_events,
                 st.session_state.saved_engineers,
@@ -304,10 +351,9 @@ with tab_add:
                 st.session_state.saved_tasks,
             )
 
-            st.success("Scheduled and permanently saved to Cloud DB!")
+            st.success("Scheduled and saved to Cloud DB!")
             st.rerun()
 
-# ----------------- TAB 3: 管理 -----------------
 with tab_manage:
     st.subheader("⚙️ Manage Schedules & Presets")
 
@@ -337,7 +383,6 @@ with tab_manage:
                         for e in st.session_state.calendar_events
                         if e["id"] != evt["id"]
                     ]
-                    # 删除后同步更新到云端
                     save_data(
                         st.session_state.calendar_events,
                         st.session_state.saved_engineers,
